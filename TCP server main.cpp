@@ -15,34 +15,34 @@
 // ===============================
 // ===      RECEIVED DATA      ===
 // ===============================
-struct thread_data{
+typedef struct thread_data{
    int  thread_id;
    float yaw,
          pitch,
          roll;
-};
+}t_data;
 // data[0]->passed data
 // data[1]->data to be passed
-struct thread_data data[2];
-//dummy data variables
-int val2pass = 0;
-int nval2pass = -1;
+t_data data[2];
+void setParameter(t_data*,t_data*);
 
 // ===============================
 // ===  MUTEX AND CONDITIONAL  ===
 // ===============================
 pthread_mutex_t conn_mutex;
 pthread_mutex_t newval_mutex;
+pthread_mutex_t analysing_mutex;
 
 pthread_cond_t conn_cv;
 pthread_cond_t newval_cv;
+pthread_cond_t analysing_cv;
 
 bool connected = false;
 bool newval = false;
-
+bool analysing = false;
 void srv_connected();
 void newval_recv();
-
+void f_analysing();
 
 
 // ===============================
@@ -66,11 +66,15 @@ void *imp_srv(void*);
 // ===      MULTIPURPOSE       ===
 // ===============================
 void error(char*);
+// data extraction and selection
+void extract(char*,t_data*);
+void setParameter(t_data*,t_data*);
+
 
 // ===============================
 // ===         MAIN            ===
 // ===============================
-
+#define DEBUG 1
 int main (int argc, char *argv[])
 {
   int i;
@@ -81,6 +85,8 @@ int main (int argc, char *argv[])
   /* Initialize mutex and condition variable objects */
   pthread_mutex_init(&conn_mutex, NULL);
   pthread_cond_init (&conn_cv, NULL);
+  pthread_mutex_init(&analysing_mutex, NULL);
+  pthread_cond_init (&analysing_cv, NULL);
   pthread_mutex_init(&newval_mutex, NULL);
   pthread_cond_init (&newval_cv, NULL);
 
@@ -88,21 +94,28 @@ int main (int argc, char *argv[])
   pthread_attr_init(&attr);
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
   pthread_create(&threads[0], &attr, tcp_srv, (void *)t1);
-  printf("created tcp_srv()thread\n");
+  #ifdef DEBUG
+    printf("created tcp_srv()thread\n");
+  #endif // DEBUG
   pthread_create(&threads[1], &attr, imp_srv, (void *)t2);
-  printf("created imp_srv() thread\n");
-
+  #ifdef DEBUG
+    printf("created imp_srv() thread\n");
+  #endif // DEBUG
   /* Wait for all threads to complete */
   for (i=0; i<NUM_THREADS; i++) {
         printf("Back into main()%d\n",i);
     pthread_join(threads[i], NULL);
   }
+  #ifdef DEBUG
   printf ("Main(): Waited on %d  threads. Done.\n", NUM_THREADS);
+  #endif // DEBUG
   scanf("%d",&i);
   /* Clean up and exit */
   pthread_attr_destroy(&attr);
+  pthread_mutex_destroy(&analysing_mutex);
   pthread_mutex_destroy(&conn_mutex);
   pthread_mutex_destroy(&newval_mutex);
+  pthread_cond_destroy(&analysing_cv);
   pthread_cond_destroy(&conn_cv);
   pthread_cond_destroy(&newval_cv);
   pthread_exit(NULL);
@@ -124,13 +137,15 @@ void *tcp_srv(void *t)
   char buff[BUFSIZE];
   char *hostaddrp;
 
-
-  printf("tcp_srv(): inside thread\n");
-
+  #ifdef DEBUG
+    printf("tcp_srv(): inside thread\n");
+  #endif // DEBUG
   sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if(sockfd < 0)
     error("Error opening socket.\n");
-  printf("tcp_srv(): created socket\n");
+    #ifdef DEBUG
+        printf("tcp_srv(): created socket\n");
+    #endif // DEBUG
 
    memset(&srv_addr, 0, sizeof(srv_addr));
 
@@ -147,41 +162,56 @@ void *tcp_srv(void *t)
   /* Now start listening for clients, sleep until client found */
   listen(sockfd, 5);
 
-
-  printf("tcp_srv() binded socket. listening\n");
+  #ifdef DEBUG
+    printf("tcp_srv() binded socket. listening\n");
+  #endif // DEBUG
   clientLen = sizeof(cli_addr);
   newsockfd = accept(sockfd, (struct sockaddr*) &cli_addr, &clientLen);
   if(newsockfd < 0) {
     error("Error on accepting socket.");
     exit(-1);
   }else{
-    printf("tcp_srv() accepted connection. new socket created.condition reached\n");
+    #ifdef DEBUG
+        printf("tcp_srv() accepted connection. new socket created.condition reached\n");
+    #endif // DEBUG
     srv_connected();
   }
-printf("tcp_srv(): before while\n");
-  while(1) {
+  #ifdef DEBUG
+    printf("tcp_srv(): before while\n");
+  #endif // DEBUG
 
+  while(1) {
+        #ifdef DEBUG
+        printf("tcp_srv(): inside main loop\n");
+        #endif // DEBUG
 		/* Receive datagram from client */
 		bzero(buff, BUFSIZE);
 		n = read(newsockfd, buff, BUFSIZE);
 
 		if(n < 0)
 			error("Error recvfrom().");
-        else printf("tcp_srv(): %s\n",buff);
+        else {
 
-		/*check if a different value was received
-		nval2pass = (int) btod(atol(buff));
-		if (nval2pass != val2pass) {
-            val2pass=nval2pass;
-            // if so notify imp_srv() thread
+
+
+            while(analysing){
+                #ifdef DEBUG
+                   printf("tcp_srv(): BLOCKED, data[1] in use\n");
+                #endif // DEBU
+                 pthread_cond_wait(&analysing_cv,&analysing_mutex);
+            }
+            #ifdef DEBUG
+               printf("tcp_srv(): received %s\n",buff);
+            #endif
+
+            analysing=true;
+ pthread_mutex_lock(&analysing_mutex);
+            extract(buff,&data[1]);
+ pthread_mutex_unlock(&analysing_mutex);
             newval_recv();
-            printf("tcp_srv(): thread %ld, assigned value %d to val2pass\n",
-                my_id, val2pass);
-        }else{
-            printf("tcp_srv(): thread %ld, nval2pass=val2pass= %d\n",
-                my_id, val2pass);
 
-        }*/
+        }
+
 	}
 
   pthread_exit(NULL);
@@ -191,22 +221,40 @@ void *imp_srv(void* t){
   long my_id = (long)t;
   pthread_mutex_lock(&conn_mutex);
   while(!connected){
+        #ifdef DEBUG
     printf("impr_srv(): BLOCKED WAITING FOR CONNECTION\n");
+        #endif
     pthread_cond_wait(&conn_cv,&conn_mutex);
   }
   while(connected){
+        #ifdef DEBUG
         printf("imp_srv(): entered while connected loop\n");
+        #endif // DEBUG
+
       while(!newval){
-        pthread_cond_wait(&newval_cv,&newval_mutex);
+        #ifdef DEBUG
         printf("imp_srv: BLOCKED WAITING FOR NEWVAL\n");
+        #endif // DEBUG
+        pthread_cond_wait(&newval_cv,&newval_mutex);
       }
-      printf("imp_srv(): thread %ld, nval2pass=val2pass= %d\n",
-                    my_id, val2pass);
-        //add data interpretation here
+
+      #ifdef DEBUG
+      printf("imp_srv(): yaw-%f\tpitch-%f\troll-%f\n",data[1].yaw,data[1].pitch,data[1].roll);
+      #endif
+        setParameter(&data[0],&data[1]);
+        f_analysing();
+
         //unblock conditional variable for JUCE API to output the
         newval=false;
   }
 
+}
+
+void f_analysing(){
+  pthread_mutex_lock(&analysing_mutex);
+  analysing = false;
+  pthread_cond_signal(&analysing_cv);
+  pthread_mutex_unlock(&analysing_mutex);
 }
 
 void srv_connected(){
@@ -224,6 +272,58 @@ void newval_recv(){
   pthread_mutex_unlock(&newval_mutex);
 }
 
+void extract(char* buff,t_data* data){
+    printf("INSIDE EXTRACT\n");
+    int t;
+    float f1,f2,f3;
+    t=sscanf(buff,"yaw:\t%f\npitch:\t%f\nroll:\t%f",&f1,&f2,&f3);
+
+    if(t!=3){ //number of elements to fill
+        printf("%d\t tcp_srv:condition faile still reading data received data:\nyaw-%f\tpitch-%f\troll-%f",data->yaw,data->pitch,data->roll);
+        error("tcp_srv: extract failed");
+    }else{
+
+    data->yaw = f1;
+    data->pitch = f2;
+    data ->roll =f3;
+
+    #ifdef DEBUG
+        printf("tcp_srv: received data:yaw-%f\tpitch-%f\troll-%f",data->yaw,data->pitch,data->roll);
+    #endif // DEBUG
+    }
+}
+
+void setParameter(t_data* passed,t_data* topass){
+    float maxDelta=0;
+    int   pos=0,
+          i=0;
+printf("AM NOW IN HERE\n");
+        if(abs(passed->yaw-topass->yaw)){
+           maxDelta=passed->yaw-topass->yaw;
+           printf("MAX DELTA needs to be ASSIGNED TO YAW\n");
+            pos=0;
+        }else if(abs(passed->pitch-topass->pitch)){
+            maxDelta=passed->pitch-topass->pitch;
+            printf("MAX DELTA needs to be ASSIGNED TO PITCH\n");
+            pos=1;
+        }else{
+            maxDelta=passed->roll-topass->roll;
+            printf("MAX DELTA needs to be ASSIGNED TO ROLL\n");
+            pos=2;
+        }
+    switch (pos){
+        case 0: {passed->yaw=topass->yaw;
+                 printf("MAX DELTA ASSIGNED TO YAW\n");
+                 break;}
+        case 1:{passed->pitch=topass->pitch;
+                printf("MAX DELTA ASSIGNED TO PITCH\n");
+                break;}
+        case 2:{passed->roll=topass->roll;
+                printf("MAX DELTA ASSIGNED TO ROLL\n");
+                break;}
+    }
+
+}
 
 
 void error(char *msg) {
