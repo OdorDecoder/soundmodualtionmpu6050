@@ -8,7 +8,7 @@ The IMU is connected with the Particle Photon via I2C. Control over the DMP is a
 Data is sampled at a rate of 100Hz, yaw pitch values are provided from the DMP and sent over to the server.
 
 As the data is received, the value with the highest rate of change is processed and inputed as parameter for sound modulation.
-This allows to
+This allows to set one modulation value per sampling frame.
 
 Work in progress
-The server receives the data, and feeds it as parameters for the modulation.
+Implement JUCE functions
